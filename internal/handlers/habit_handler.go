@@ -1,0 +1,261 @@
+// Package handlers contains HTTP handlers for the habit tracker API.
+// Each handler receives (w http.ResponseWriter, r *http.Request) - the standard Go HTTP signature.
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"habit-tracker-be/internal/database"
+	"habit-tracker-be/internal/models"
+)
+
+// DefaultUserID is used for v1 without auth. When you add Supabase Auth (Phase 6),
+// replace this with the user_id from the JWT. Ensure you have at least one user
+// in the `users` table (e.g. INSERT INTO users (id, email) VALUES (1, 'dev@example.com');).
+const DefaultUserID = 1
+
+// GetHabits returns all habits for the default user, with completed dates, status, and streak.
+func GetHabits(w http.ResponseWriter, r *http.Request) {
+	log.Println("[GetHabits] Handling GET /api/habits")
+
+	// Query habits for the default user (including description, frequency_details, locked).
+	rows, err := database.DB.Query(r.Context(),
+		`SELECT id, title, description, icon, color, frequency, frequency_details, locked
+		 FROM habits WHERE user_id = $1 ORDER BY id`,
+		DefaultUserID)
+	if err != nil {
+		log.Printf("[GetHabits] DB query error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close() // Always close rows to release DB connection back to pool
+
+	var habits []models.Habit
+	for rows.Next() {
+		var h models.Habit
+		var description *string // NULL in DB -> nil; we assign to h.Description below
+		if err := rows.Scan(&h.ID, &h.Title, &description, &h.Icon, &h.Color, &h.Frequency, &h.FrequencyDetails, &h.Locked); err != nil {
+			log.Printf("[GetHabits] Row scan error for habit: %v", err)
+			continue
+		}
+		if description != nil {
+			h.Description = *description
+		}
+
+		// Fetch completed dates for this habit (N+1 pattern - fine for small datasets; use JOINs for scale).
+		h.CompletedDates, err = fetchCompletedDates(r.Context(), h.ID)
+		if err != nil {
+			log.Printf("[GetHabits] Failed to fetch logs for habit %d: %v", h.ID, err)
+			h.CompletedDates = []string{}
+		}
+
+		// Compute status: "locked" (gamification), "completed", or "pending".
+		today := time.Now().Format("2006-01-02") // Go's reference date is 2006-01-02 (MST)
+		if h.Locked {
+			h.Status = "locked"
+		} else {
+			h.Status = "pending"
+			for _, d := range h.CompletedDates {
+				if d == today {
+					h.Status = "completed"
+					break
+				}
+			}
+		}
+
+		// Compute streak: consecutive days completed ending today (or yesterday if today not done).
+		h.Streak = computeStreak(h.CompletedDates, today)
+
+		habits = append(habits, h)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("[GetHabits] Rows iteration error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return empty array instead of null when no habits (better for frontend).
+	if habits == nil {
+		habits = []models.Habit{}
+	}
+
+	log.Printf("[GetHabits] Returning %d habits", len(habits))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(habits); err != nil {
+		log.Printf("[GetHabits] JSON encode error: %v", err)
+	}
+}
+
+// fetchCompletedDates returns all completed_at dates for a habit as YYYY-MM-DD strings.
+func fetchCompletedDates(ctx context.Context, habitID int) ([]string, error) {
+	rows, err := database.DB.Query(ctx,
+		"SELECT completed_at::text FROM habit_logs WHERE habit_id = $1 ORDER BY completed_at DESC",
+		habitID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var dates []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			continue
+		}
+		// PostgreSQL may return "2024-01-15T00:00:00Z" - trim to date part if needed.
+		if len(d) >= 10 {
+			d = d[:10]
+		}
+		dates = append(dates, d)
+	}
+	return dates, rows.Err()
+}
+
+// computeStreak returns the current streak: consecutive days completed up to today.
+// If today is completed, streak counts from today backwards; otherwise from yesterday.
+func computeStreak(completedDates []string, today string) int {
+	if len(completedDates) == 0 {
+		return 0
+	}
+	// Build a set of completed dates for quick lookup.
+	set := make(map[string]bool)
+	for _, d := range completedDates {
+		set[d] = true
+	}
+
+	// Decide end date: if today is completed, count from today; else from yesterday.
+	end, _ := time.Parse("2006-01-02", today)
+	if !set[today] {
+		end = end.AddDate(0, 0, -1)
+	}
+
+	streak := 0
+	for {
+		key := end.Format("2006-01-02")
+		if !set[key] {
+			break
+		}
+		streak++
+		end = end.AddDate(0, 0, -1)
+	}
+	return streak
+}
+
+// CreateHabit creates a new habit from the JSON body.
+func CreateHabit(w http.ResponseWriter, r *http.Request) {
+	log.Println("[CreateHabit] Handling POST /api/habits")
+
+	var req models.CreateHabitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[CreateHabit] Invalid JSON body: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Apply defaults if not provided (Go zero value for string is "").
+	if req.Color == "" {
+		req.Color = "#58cc02"
+	}
+	if req.Frequency == "" {
+		req.Frequency = "daily"
+	}
+	locked := false
+	if req.Locked != nil {
+		locked = *req.Locked
+	}
+
+	// Optional description: store NULL in DB when empty so frontend can distinguish omit vs "".
+	var desc *string
+	if req.Description != "" {
+		desc = &req.Description
+	}
+	var id int
+	err := database.DB.QueryRow(r.Context(),
+		`INSERT INTO habits (user_id, title, description, icon, color, frequency, frequency_details, locked)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		DefaultUserID, req.Title, desc, req.Icon, req.Color, req.Frequency,
+		req.FrequencyDetails, locked).Scan(&id)
+	if err != nil {
+		log.Printf("[CreateHabit] INSERT error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("[CreateHabit] Created habit id=%d title=%q", id, req.Title)
+	w.WriteHeader(http.StatusCreated)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"id": id, "title": req.Title}); err != nil {
+		log.Printf("[CreateHabit] JSON encode error: %v", err)
+	}
+}
+
+// ToggleHabitLog toggles a completion log for a habit on a given date.
+// If the log exists, it is deleted; otherwise it is inserted.
+// Query param: date=YYYY-MM-DD (defaults to today).
+func ToggleHabitLog(w http.ResponseWriter, r *http.Request) {
+	habitIDStr := chi.URLParam(r, "id")
+	log.Printf("[ToggleHabitLog] Handling POST /api/habits/%s/log", habitIDStr)
+
+	habitID, err := strconv.Atoi(habitIDStr)
+	if err != nil || habitID <= 0 {
+		log.Printf("[ToggleHabitLog] Invalid habit id: %q", habitIDStr)
+		http.Error(w, "Invalid habit id", http.StatusBadRequest)
+		return
+	}
+
+	dateStr := r.URL.Query().Get("date")
+	if dateStr == "" {
+		dateStr = time.Now().Format("2006-01-02")
+	}
+	// Basic date validation: must be YYYY-MM-DD.
+	if _, err := time.Parse("2006-01-02", dateStr); err != nil {
+		log.Printf("[ToggleHabitLog] Invalid date: %q", dateStr)
+		http.Error(w, "Invalid date (use YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+
+	var exists bool
+	err = database.DB.QueryRow(r.Context(),
+		"SELECT EXISTS(SELECT 1 FROM habit_logs WHERE habit_id = $1 AND completed_at = $2::date)",
+		habitID, dateStr).Scan(&exists)
+	if err != nil {
+		log.Printf("[ToggleHabitLog] EXISTS query error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if exists {
+		_, err = database.DB.Exec(r.Context(),
+			"DELETE FROM habit_logs WHERE habit_id = $1 AND completed_at = $2::date",
+			habitID, dateStr)
+		if err != nil {
+			log.Printf("[ToggleHabitLog] DELETE error: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("[ToggleHabitLog] Removed log habit_id=%d date=%s", habitID, dateStr)
+	} else {
+		_, err = database.DB.Exec(r.Context(),
+			"INSERT INTO habit_logs (habit_id, completed_at) VALUES ($1, $2::date)",
+			habitID, dateStr)
+		if err != nil {
+			log.Printf("[ToggleHabitLog] INSERT error: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("[ToggleHabitLog] Added log habit_id=%d date=%s", habitID, dateStr)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "Toggled"}); err != nil {
+		log.Printf("[ToggleHabitLog] JSON encode error: %v", err)
+	}
+}
