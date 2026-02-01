@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -25,6 +26,10 @@ func Connect(connString string) {
 	if err != nil {
 		log.Fatal("[DB] Unable to parse DB config:", err)
 	}
+
+	// Use simple protocol (no prepared statements) so Supabase/pooler reuse doesn't cause
+	// "prepared statement already exists" when connections are shared or reattached.
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	// Context with timeout: we don't want to hang forever if the DB is unreachable.
 	// In Go, context.Context is used for cancellation and deadlines across async operations.
