@@ -57,7 +57,7 @@ go test ./internal/handlers/... -v
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/habits` | List all habits (with completed dates, status, streak). |
+| GET | `/api/habits` | List habits for a specific day. Query: `?date=YYYY-MM-DD` (default: today). Returns computed status and streak relative to the date. |
 | POST | `/api/habits` | Create a habit (JSON: `title`, optional `icon`, `color`, `frequency`). |
 | POST | `/api/habits/{id}/log` | Toggle completion for a habit on a date. Query: `?date=YYYY-MM-DD` (default: today). |
 

@@ -8,11 +8,13 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"habit-tracker-be/internal/database"
 	"habit-tracker-be/internal/models"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // DefaultUserID is used for v1 without auth. When you add Supabase Auth (Phase 6),
@@ -20,9 +22,22 @@ import (
 // in the `users` table (e.g. INSERT INTO users (id, email) VALUES (1, 'dev@example.com');).
 const DefaultUserID = 1
 
-// GetHabits returns all habits for the default user, with completed dates, status, and streak.
+// GetHabits returns habits for a specific date (defaults to today).
+// Query param: date=YYYY-MM-DD
 func GetHabits(w http.ResponseWriter, r *http.Request) {
 	log.Println("[GetHabits] Handling GET /api/habits")
+
+	// Parse optional date parameter; default to current local date.
+	targetDateStr := r.URL.Query().Get("date")
+	if targetDateStr == "" {
+		targetDateStr = time.Now().Format("2006-01-02")
+	}
+	targetTime, err := time.Parse("2006-01-02", targetDateStr)
+	if err != nil {
+		log.Printf("[GetHabits] Invalid date parameter %q: %v", targetDateStr, err)
+		http.Error(w, "Invalid date format (YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
 
 	// Query habits for the default user (including description, frequency_details, locked).
 	rows, err := database.DB.Query(r.Context(),
@@ -34,12 +49,12 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close() // Always close rows to release DB connection back to pool
+	defer rows.Close()
 
 	var habits []models.Habit
 	for rows.Next() {
 		var h models.Habit
-		var description *string // NULL in DB -> nil; we assign to h.Description below
+		var description *string
 		if err := rows.Scan(&h.ID, &h.Title, &description, &h.Icon, &h.Color, &h.Frequency, &h.FrequencyDetails, &h.Locked); err != nil {
 			log.Printf("[GetHabits] Row scan error for habit: %v", err)
 			continue
@@ -48,30 +63,32 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 			h.Description = *description
 		}
 
-		// Fetch completed dates for this habit (N+1 pattern - fine for small datasets; use JOINs for scale).
 		h.CompletedDates, err = fetchCompletedDates(r.Context(), h.ID)
 		if err != nil {
 			log.Printf("[GetHabits] Failed to fetch logs for habit %d: %v", h.ID, err)
 			h.CompletedDates = []string{}
 		}
 
-		// Compute status: "locked" (gamification), "completed", or "pending".
-		today := time.Now().Format("2006-01-02") // Go's reference date is 2006-01-02 (MST)
+		// Compute status relative to targetDateStr.
 		if h.Locked {
 			h.Status = "locked"
 		} else {
 			h.Status = "pending"
 			for _, d := range h.CompletedDates {
-				if d == today {
+				if d == targetDateStr {
 					h.Status = "completed"
 					break
 				}
 			}
 		}
 
-		// Compute streak: consecutive days completed ending today (or yesterday if today not done).
-		h.Streak = computeStreak(h.CompletedDates, today)
+		// Compute streak relative to targetDateStr.
+		h.Streak = computeStreak(h.CompletedDates, targetDateStr)
 
+		// Filter: only include habits that are due on targetTime.
+		if !habitDueOnDate(h, targetTime) {
+			continue
+		}
 		habits = append(habits, h)
 	}
 
@@ -116,6 +133,70 @@ func fetchCompletedDates(ctx context.Context, habitID int) ([]string, error) {
 		dates = append(dates, d)
 	}
 	return dates, rows.Err()
+}
+
+// habitDueOnDate returns true if the habit should be shown on the given date based on frequency and frequencyDetails.
+// - daily: always true.
+// - weekly: true only if date's weekday is in frequencyDetails.days.
+// - monthly: true only if date's day of month equals frequencyDetails.dayOfMonth.
+func habitDueOnDate(h models.Habit, date time.Time) bool {
+	switch h.Frequency {
+	case "daily":
+		return true
+	case "weekly":
+		return habitDueOnDateWeekly(h.FrequencyDetails, date)
+	case "monthly":
+		return habitDueOnDateMonthly(h.FrequencyDetails, date)
+	default:
+		return true
+	}
+}
+
+func habitDueOnDateWeekly(details *models.FrequencyDetails, date time.Time) bool {
+	if details == nil || len(*details) == 0 {
+		return true
+	}
+	var parsed struct {
+		Days []interface{} `json:"days"` // ["monday","wednesday"] or [0,1,2]
+	}
+	if err := json.Unmarshal(*details, &parsed); err != nil || len(parsed.Days) == 0 {
+		return true
+	}
+	weekday := date.Weekday() // time.Sunday=0, Monday=1, ..., Saturday=6
+	for _, d := range parsed.Days {
+		switch v := d.(type) {
+		case string:
+			if weekdayStringMatches(weekday, v) {
+				return true
+			}
+		case float64:
+			if int(v) == int(weekday) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var weekdayNames = []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}
+
+func weekdayStringMatches(weekday time.Weekday, s string) bool {
+	name := weekdayNames[weekday]
+	return len(s) > 0 && strings.EqualFold(s, name)
+}
+
+func habitDueOnDateMonthly(details *models.FrequencyDetails, date time.Time) bool {
+	if details == nil || len(*details) == 0 {
+		return true
+	}
+	var parsed struct {
+		DayOfMonth *int `json:"dayOfMonth"`
+	}
+	if err := json.Unmarshal(*details, &parsed); err != nil || parsed.DayOfMonth == nil {
+		return true
+	}
+	day := date.Day() // 1-31
+	return day == *parsed.DayOfMonth
 }
 
 // computeStreak returns the current streak: consecutive days completed up to today.
@@ -176,10 +257,15 @@ func CreateHabit(w http.ResponseWriter, r *http.Request) {
 	if req.Description != "" {
 		desc = &req.Description
 	}
+
+	if req.FrequencyDetails != nil {
+		log.Printf("[CreateHabit] FrequencyDetails: %s", string(*req.FrequencyDetails))
+	}
+
 	var id int
 	err := database.DB.QueryRow(r.Context(),
 		`INSERT INTO habits (user_id, title, description, icon, color, frequency, frequency_details, locked)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) RETURNING id`,
 		DefaultUserID, req.Title, desc, req.Icon, req.Color, req.Frequency,
 		req.FrequencyDetails, locked).Scan(&id)
 	if err != nil {

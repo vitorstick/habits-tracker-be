@@ -2,7 +2,9 @@
 package handlers
 
 import (
+	"habit-tracker-be/internal/models"
 	"testing"
+	"time"
 )
 
 func TestComputeStreak(t *testing.T) {
@@ -28,4 +30,56 @@ func TestComputeStreak(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHabitDueOnDate(t *testing.T) {
+	// 2026-02-01 is a Sunday (Weekday 0)
+	sunday, _ := time.Parse("2006-01-02", "2026-02-01")
+	monday, _ := time.Parse("2006-01-02", "2026-02-02")
+
+	t.Run("daily habit", func(t *testing.T) {
+		h := models.Habit{Frequency: "daily"}
+		if !habitDueOnDate(h, sunday) {
+			t.Error("daily habit should be due on Sunday")
+		}
+		if !habitDueOnDate(h, monday) {
+			t.Error("daily habit should be due on Monday")
+		}
+	})
+
+	t.Run("weekly habit - weekday name", func(t *testing.T) {
+		details := models.FrequencyDetails(`{"days": ["monday", "wednesday"]}`)
+		h := models.Habit{Frequency: "weekly", FrequencyDetails: &details}
+		if habitDueOnDate(h, sunday) {
+			t.Error("weekly habit (mon/wed) should NOT be due on Sunday")
+		}
+		if !habitDueOnDate(h, monday) {
+			t.Error("weekly habit (mon/wed) should be due on Monday")
+		}
+	})
+
+	t.Run("weekly habit - weekday number", func(t *testing.T) {
+		details := models.FrequencyDetails(`{"days": [0, 2]}`) // Sunday and Tuesday
+		h := models.Habit{Frequency: "weekly", FrequencyDetails: &details}
+		if !habitDueOnDate(h, sunday) {
+			t.Error("weekly habit (0, 2) should be due on Sunday")
+		}
+		if habitDueOnDate(h, monday) {
+			t.Error("weekly habit (0, 2) should NOT be due on Monday")
+		}
+	})
+
+	t.Run("monthly habit", func(t *testing.T) {
+		details := models.FrequencyDetails(`{"dayOfMonth": 15}`)
+		h := models.Habit{Frequency: "monthly", FrequencyDetails: &details}
+		day15, _ := time.Parse("2006-01-02", "2026-02-15")
+		day16, _ := time.Parse("2006-01-02", "2026-02-16")
+
+		if !habitDueOnDate(h, day15) {
+			t.Error("monthly habit should be due on the 15th")
+		}
+		if habitDueOnDate(h, day16) {
+			t.Error("monthly habit should NOT be due on the 16th")
+		}
+	})
 }
