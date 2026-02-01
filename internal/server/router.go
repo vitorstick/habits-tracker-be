@@ -72,6 +72,7 @@ func Router() http.Handler {
 		r.Get("/habits", handlers.GetHabits)
 		r.Post("/habits", handlers.CreateHabit)
 		r.Post("/habits/{id}/log", handlers.ToggleHabitLog)
+		r.Delete("/habits/{id}", handlers.DeleteHabit)
 	})
 
 	return r

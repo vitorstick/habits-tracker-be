@@ -345,3 +345,38 @@ func ToggleHabitLog(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[ToggleHabitLog] JSON encode error: %v", err)
 	}
 }
+
+// DeleteHabit deletes a habit and its logs (via CASCADE) for the default user.
+func DeleteHabit(w http.ResponseWriter, r *http.Request) {
+	habitIDStr := chi.URLParam(r, "id")
+	log.Printf("[DeleteHabit] Handling DELETE /api/habits/%s", habitIDStr)
+
+	habitID, err := strconv.Atoi(habitIDStr)
+	if err != nil || habitID <= 0 {
+		log.Printf("[DeleteHabit] Invalid habit id: %q", habitIDStr)
+		http.Error(w, "Invalid habit id", http.StatusBadRequest)
+		return
+	}
+
+	result, err := database.DB.Exec(r.Context(),
+		"DELETE FROM habits WHERE id = $1 AND user_id = $2",
+		habitID, DefaultUserID)
+	if err != nil {
+		log.Printf("[DeleteHabit] DELETE error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		log.Printf("[DeleteHabit] Habit %d not found or not owned by user", habitID)
+		http.Error(w, "Habit not found", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("[DeleteHabit] Deleted habit id=%d", habitID)
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "Habit deleted"}); err != nil {
+		log.Printf("[DeleteHabit] JSON encode error: %v", err)
+	}
+}
