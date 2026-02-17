@@ -82,6 +82,42 @@ func TestCreateHabit_InvalidJSON_Returns400(t *testing.T) {
 	}
 }
 
+func TestCreateHabit_EmptyTitle_Returns400(t *testing.T) {
+	body := []byte(`{"title":"","color":"#ff0000"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/habits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/habits with empty title status = %d, want 400", rec.Code)
+	}
+}
+
+func TestCreateHabit_InvalidColor_Returns400(t *testing.T) {
+	body := []byte(`{"title":"Test","color":"invalid"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/habits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/habits with invalid color status = %d, want 400", rec.Code)
+	}
+}
+
+func TestCreateHabit_InvalidFrequency_Returns400(t *testing.T) {
+	body := []byte(`{"title":"Test","frequency":"hourly"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/habits", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/habits with invalid frequency status = %d, want 400", rec.Code)
+	}
+}
+
 func TestToggleHabitLog_InvalidID_Returns400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/habits/notanid/log", nil)
 	rec := httptest.NewRecorder()

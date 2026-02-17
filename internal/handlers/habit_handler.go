@@ -5,6 +5,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -279,6 +280,65 @@ func computeStreak(completedDates []string, today string) int {
 	return streak
 }
 
+// validateCreateHabitRequest validates the input for creating a habit.
+func validateCreateHabitRequest(req *models.CreateHabitRequest) error {
+	// Title is required and must not be empty.
+	if req.Title == "" {
+		return fmt.Errorf("title is required")
+	}
+	if len(req.Title) > 100 {
+		return fmt.Errorf("title too long (max 100 characters)")
+	}
+
+	// Color must be valid hex format if provided (non-empty after defaults are applied).
+	if req.Color != "" && !isValidHexColor(req.Color) {
+		return fmt.Errorf("invalid color format (use #RRGGBB or #RGB)")
+	}
+
+	// Frequency must be one of the valid values if provided.
+	if req.Frequency != "" && !isValidFrequency(req.Frequency) {
+		return fmt.Errorf("invalid frequency (must be daily, weekly, monthly, or custom)")
+	}
+
+	// FrequencyDetails must be valid JSON if provided.
+	if req.FrequencyDetails != nil && len(*req.FrequencyDetails) > 0 {
+		var test interface{}
+		if err := json.Unmarshal(*req.FrequencyDetails, &test); err != nil {
+			return fmt.Errorf("invalid frequencyDetails JSON: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// isValidHexColor checks if a string is a valid hex color (#RGB or #RRGGBB).
+func isValidHexColor(color string) bool {
+	if len(color) != 4 && len(color) != 7 {
+		return false
+	}
+	if color[0] != '#' {
+		return false
+	}
+	for i := 1; i < len(color); i++ {
+		c := color[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidFrequency checks if a frequency string is one of the allowed values.
+func isValidFrequency(freq string) bool {
+	validFrequencies := map[string]bool{
+		"daily":   true,
+		"weekly":  true,
+		"monthly": true,
+		"custom":  true,
+	}
+	return validFrequencies[freq]
+}
+
 // CreateHabit creates a new habit from the JSON body.
 func CreateHabit(w http.ResponseWriter, r *http.Request) {
 	log.Println("[CreateHabit] Handling POST /api/habits")
@@ -287,6 +347,13 @@ func CreateHabit(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[CreateHabit] Invalid JSON body: %v", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate input before processing.
+	if err := validateCreateHabitRequest(&req); err != nil {
+		log.Printf("[CreateHabit] Validation error: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

@@ -3,6 +3,7 @@ package handlers
 
 import (
 	"habit-tracker-be/internal/models"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,4 +93,137 @@ func TestDeleteHabit(t *testing.T) {
 		// This is hard to unit test without a mock DB or full integration test.
 		// For now, we rely on the manual curl verification once the server is restarted.
 	})
+}
+
+func TestValidateCreateHabitRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     models.CreateHabitRequest
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "empty title",
+			req:     models.CreateHabitRequest{Title: ""},
+			wantErr: true,
+			errMsg:  "title is required",
+		},
+		{
+			name:    "title too long",
+			req:     models.CreateHabitRequest{Title: string(make([]byte, 101))},
+			wantErr: true,
+			errMsg:  "title too long",
+		},
+		{
+			name:    "invalid hex color - missing hash",
+			req:     models.CreateHabitRequest{Title: "Test", Color: "FF0000"},
+			wantErr: true,
+			errMsg:  "invalid color format",
+		},
+		{
+			name:    "invalid hex color - wrong length",
+			req:     models.CreateHabitRequest{Title: "Test", Color: "#FF00"},
+			wantErr: true,
+			errMsg:  "invalid color format",
+		},
+		{
+			name:    "invalid hex color - non-hex chars",
+			req:     models.CreateHabitRequest{Title: "Test", Color: "#GGGGGG"},
+			wantErr: true,
+			errMsg:  "invalid color format",
+		},
+		{
+			name:    "invalid frequency",
+			req:     models.CreateHabitRequest{Title: "Test", Frequency: "hourly"},
+			wantErr: true,
+			errMsg:  "invalid frequency",
+		},
+		{
+			name: "invalid frequencyDetails JSON",
+			req: models.CreateHabitRequest{
+				Title:            "Test",
+				FrequencyDetails: func() *models.FrequencyDetails { d := models.FrequencyDetails(`{invalid json}`); return &d }(),
+			},
+			wantErr: true,
+			errMsg:  "invalid frequencyDetails JSON",
+		},
+		{
+			name:    "valid - minimal",
+			req:     models.CreateHabitRequest{Title: "Test"},
+			wantErr: false,
+		},
+		{
+			name:    "valid - with 3-char hex",
+			req:     models.CreateHabitRequest{Title: "Test", Color: "#F00"},
+			wantErr: false,
+		},
+		{
+			name:    "valid - with 6-char hex",
+			req:     models.CreateHabitRequest{Title: "Test", Color: "#FF0000"},
+			wantErr: false,
+		},
+		{
+			name:    "valid - with lowercase hex",
+			req:     models.CreateHabitRequest{Title: "Test", Color: "#ff0000"},
+			wantErr: false,
+		},
+		{
+			name:    "valid - all frequencies",
+			req:     models.CreateHabitRequest{Title: "Test", Frequency: "weekly"},
+			wantErr: false,
+		},
+		{
+			name: "valid - with frequencyDetails",
+			req: models.CreateHabitRequest{
+				Title:            "Test",
+				Frequency:        "weekly",
+				FrequencyDetails: func() *models.FrequencyDetails { d := models.FrequencyDetails(`{"days":[0,1,2]}`); return &d }(),
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCreateHabitRequest(&tt.req)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("validateCreateHabitRequest() expected error containing %q, got nil", tt.errMsg)
+				} else if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("validateCreateHabitRequest() error = %q, want error containing %q", err.Error(), tt.errMsg)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("validateCreateHabitRequest() unexpected error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestIsValidHexColor(t *testing.T) {
+	tests := []struct {
+		color string
+		want  bool
+	}{
+		{"#FF0000", true},
+		{"#ff0000", true},
+		{"#F00", true},
+		{"#f00", true},
+		{"#123ABC", true},
+		{"FF0000", false},  // missing #
+		{"#FF00", false},   // wrong length
+		{"#GGGGGG", false}, // invalid hex chars
+		{"#", false},       // too short
+		{"", false},        // empty
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.color, func(t *testing.T) {
+			got := isValidHexColor(tt.color)
+			if got != tt.want {
+				t.Errorf("isValidHexColor(%q) = %v, want %v", tt.color, got, tt.want)
+			}
+		})
+	}
 }
