@@ -91,21 +91,23 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 			h.CompletedDates = []string{}
 		}
 
-		// Compute status relative to targetDateStr.
-		if h.Locked {
-			h.Status = "locked"
-		} else {
-			h.Status = "pending"
-			for _, d := range h.CompletedDates {
-				if d == targetDateStr {
-					h.Status = "completed"
-					break
-				}
-			}
+		// Build a set of completed dates for O(1) lookup (used for both status and streak).
+		completedSet := make(map[string]bool, len(h.CompletedDates))
+		for _, d := range h.CompletedDates {
+			completedSet[d] = true
 		}
 
-		// Compute streak relative to targetDateStr.
-		h.Streak = computeStreak(h.CompletedDates, targetDateStr)
+		// Compute status relative to targetDateStr using O(1) map lookup.
+		if h.Locked {
+			h.Status = "locked"
+		} else if completedSet[targetDateStr] {
+			h.Status = "completed"
+		} else {
+			h.Status = "pending"
+		}
+
+		// Compute streak relative to targetDateStr (reuses the completedSet).
+		h.Streak = computeStreakWithSet(completedSet, targetDateStr)
 
 		// Filter: only include habits that are due on targetTime.
 		if !habitDueOnDate(h, targetTime) {
@@ -263,7 +265,11 @@ func computeStreak(completedDates []string, today string) int {
 	}
 
 	// Decide end date: if today is completed, count from today; else from yesterday.
-	end, _ := time.Parse("2006-01-02", today)
+	end, err := time.Parse("2006-01-02", today)
+	if err != nil {
+		// If date parsing fails, return 0 (shouldn't happen as date is validated earlier).
+		return 0
+	}
 	if !set[today] {
 		end = end.AddDate(0, 0, -1)
 	}
@@ -272,6 +278,35 @@ func computeStreak(completedDates []string, today string) int {
 	for {
 		key := end.Format("2006-01-02")
 		if !set[key] {
+			break
+		}
+		streak++
+		end = end.AddDate(0, 0, -1)
+	}
+	return streak
+}
+
+// computeStreakWithSet is an optimized version of computeStreak that accepts a pre-built set
+// of completed dates. This avoids rebuilding the same set when both status and streak need it.
+func computeStreakWithSet(completedSet map[string]bool, today string) int {
+	if len(completedSet) == 0 {
+		return 0
+	}
+
+	// Decide end date: if today is completed, count from today; else from yesterday.
+	end, err := time.Parse("2006-01-02", today)
+	if err != nil {
+		// If date parsing fails, return 0 (shouldn't happen as date is validated earlier).
+		return 0
+	}
+	if !completedSet[today] {
+		end = end.AddDate(0, 0, -1)
+	}
+
+	streak := 0
+	for {
+		key := end.Format("2006-01-02")
+		if !completedSet[key] {
 			break
 		}
 		streak++
