@@ -402,6 +402,7 @@ func CreateHabit(w http.ResponseWriter, r *http.Request) {
 // ToggleHabitLog toggles a completion log for a habit on a given date.
 // If the log exists, it is deleted; otherwise it is inserted.
 // Query param: date=YYYY-MM-DD (defaults to today).
+// Uses a transaction to prevent race conditions from concurrent toggles.
 func ToggleHabitLog(w http.ResponseWriter, r *http.Request) {
 	habitIDStr := chi.URLParam(r, "id")
 	log.Printf("[ToggleHabitLog] Handling POST /api/habits/%s/log", habitIDStr)
@@ -424,41 +425,60 @@ func ToggleHabitLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var exists bool
-	err = database.DB.QueryRow(r.Context(),
-		"SELECT EXISTS(SELECT 1 FROM habit_logs WHERE habit_id = $1 AND completed_at = $2::date)",
-		habitID, dateStr).Scan(&exists)
+	// Begin transaction to ensure atomicity and prevent race conditions.
+	tx, err := database.DB.Begin(r.Context())
 	if err != nil {
-		log.Printf("[ToggleHabitLog] EXISTS query error: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[ToggleHabitLog] Failed to begin transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context()) // Rollback if not committed
+
+	// Try to delete first. If the log exists, this will remove it.
+	result, err := tx.Exec(r.Context(),
+		"DELETE FROM habit_logs WHERE habit_id = $1 AND completed_at = $2::date",
+		habitID, dateStr)
+	if err != nil {
+		log.Printf("[ToggleHabitLog] DELETE error: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	if exists {
-		_, err = database.DB.Exec(r.Context(),
-			"DELETE FROM habit_logs WHERE habit_id = $1 AND completed_at = $2::date",
-			habitID, dateStr)
-		if err != nil {
-			log.Printf("[ToggleHabitLog] DELETE error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	rowsAffected := result.RowsAffected()
+	var action string
+
+	if rowsAffected > 0 {
+		// Log was deleted successfully.
+		action = "removed"
 		log.Printf("[ToggleHabitLog] Removed log habit_id=%d date=%s", habitID, dateStr)
 	} else {
-		_, err = database.DB.Exec(r.Context(),
+		// Log didn't exist, so insert it.
+		_, err = tx.Exec(r.Context(),
 			"INSERT INTO habit_logs (habit_id, completed_at) VALUES ($1, $2::date)",
 			habitID, dateStr)
 		if err != nil {
 			log.Printf("[ToggleHabitLog] INSERT error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
+		action = "added"
 		log.Printf("[ToggleHabitLog] Added log habit_id=%d date=%s", habitID, dateStr)
+	}
+
+	// Commit the transaction.
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Printf("[ToggleHabitLog] Failed to commit transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"message": "Toggled"}); err != nil {
+	response := map[string]string{
+		"message": "Toggled",
+		"action":  action, // "added" or "removed" for client feedback
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Printf("[ToggleHabitLog] JSON encode error: %v", err)
 	}
 }
