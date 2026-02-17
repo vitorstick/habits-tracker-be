@@ -51,7 +51,9 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// First pass: collect all habits and their IDs.
 	var habits []models.Habit
+	var habitIDs []int
 	for rows.Next() {
 		var h models.Habit
 		var description *string
@@ -62,10 +64,29 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 		if description != nil {
 			h.Description = *description
 		}
+		habits = append(habits, h)
+		habitIDs = append(habitIDs, h.ID)
+	}
 
-		h.CompletedDates, err = fetchCompletedDates(r.Context(), h.ID)
-		if err != nil {
-			log.Printf("[GetHabits] Failed to fetch logs for habit %d: %v", h.ID, err)
+	if err := rows.Err(); err != nil {
+		log.Printf("[GetHabits] Rows iteration error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Batch fetch all logs for all habits in a single query (fixes N+1 problem).
+	logsByHabit, err := fetchCompletedDatesBatch(r.Context(), habitIDs)
+	if err != nil {
+		log.Printf("[GetHabits] Failed to batch fetch logs: %v", err)
+		// Continue with empty logs rather than failing the entire request.
+		logsByHabit = make(map[int][]string)
+	}
+
+	// Second pass: attach logs, compute status/streak, and filter by frequency.
+	var filteredHabits []models.Habit
+	for _, h := range habits {
+		h.CompletedDates = logsByHabit[h.ID]
+		if h.CompletedDates == nil {
 			h.CompletedDates = []string{}
 		}
 
@@ -89,14 +110,9 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 		if !habitDueOnDate(h, targetTime) {
 			continue
 		}
-		habits = append(habits, h)
+		filteredHabits = append(filteredHabits, h)
 	}
-
-	if err := rows.Err(); err != nil {
-		log.Printf("[GetHabits] Rows iteration error: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	habits = filteredHabits
 
 	// Return empty array instead of null when no habits (better for frontend).
 	if habits == nil {
@@ -133,6 +149,40 @@ func fetchCompletedDates(ctx context.Context, habitID int) ([]string, error) {
 		dates = append(dates, d)
 	}
 	return dates, rows.Err()
+}
+
+// fetchCompletedDatesBatch returns all completed_at dates for multiple habits in a single query.
+// Returns a map of habitID -> []dates. This prevents N+1 queries when fetching logs for many habits.
+func fetchCompletedDatesBatch(ctx context.Context, habitIDs []int) (map[int][]string, error) {
+	if len(habitIDs) == 0 {
+		return make(map[int][]string), nil
+	}
+
+	rows, err := database.DB.Query(ctx,
+		`SELECT habit_id, completed_at::text
+		 FROM habit_logs
+		 WHERE habit_id = ANY($1)
+		 ORDER BY habit_id, completed_at DESC`,
+		habitIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	logsByHabit := make(map[int][]string)
+	for rows.Next() {
+		var habitID int
+		var d string
+		if err := rows.Scan(&habitID, &d); err != nil {
+			continue
+		}
+		// PostgreSQL may return "2024-01-15T00:00:00Z" - trim to date part if needed.
+		if len(d) >= 10 {
+			d = d[:10]
+		}
+		logsByHabit[habitID] = append(logsByHabit[habitID], d)
+	}
+	return logsByHabit, rows.Err()
 }
 
 // habitDueOnDate returns true if the habit should be shown on the given date based on frequency and frequencyDetails.
