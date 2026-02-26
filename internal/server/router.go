@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"habit-tracker-be/internal/database"
 	"habit-tracker-be/internal/handlers"
+	"habit-tracker-be/internal/middleware"
 )
 
 // responseWriter wraps http.ResponseWriter to capture status code and bytes written.
@@ -57,8 +59,8 @@ func Router() http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(requestLogger)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(chimiddleware.Logger)
+	r.Use(chimiddleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
@@ -69,10 +71,21 @@ func Router() http.Handler {
 	}))
 
 	r.Route("/api", func(r chi.Router) {
-		r.Get("/habits", handlers.GetHabits)
-		r.Post("/habits", handlers.CreateHabit)
-		r.Post("/habits/{id}/log", handlers.ToggleHabitLog)
-		r.Delete("/habits/{id}", handlers.DeleteHabit)
+		// Public auth routes
+		r.Post("/auth/register", handlers.Register)
+		r.Post("/auth/login", handlers.Login)
+
+		// Protected routes
+		r.Group(func(r chi.Router) {
+			// If SUPABASE_JWT_SECRET is not set, authentication is skipped for development
+			r.Use(middleware.RequireAuth(database.GetOrCreateUserByAuthID))
+
+			r.Get("/auth/me", handlers.GetCurrentUser)
+			r.Get("/habits", handlers.GetHabits)
+			r.Post("/habits", handlers.CreateHabit)
+			r.Post("/habits/{id}/log", handlers.ToggleHabitLog)
+			r.Delete("/habits/{id}", handlers.DeleteHabit)
+		})
 	})
 
 	return r

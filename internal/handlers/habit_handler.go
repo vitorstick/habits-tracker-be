@@ -8,20 +8,40 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"habit-tracker-be/internal/database"
+	custommw "habit-tracker-be/internal/middleware"
 	"habit-tracker-be/internal/models"
 
 	"github.com/go-chi/chi/v5"
 )
 
-// DefaultUserID is used for v1 without auth. When you add Supabase Auth (Phase 6),
-// replace this with the user_id from the JWT. Ensure you have at least one user
-// in the `users` table (e.g. INSERT INTO users (id, email) VALUES (1, 'dev@example.com');).
+// DefaultUserID is used for development when SUPABASE_JWT_SECRET is not set.
+// In production with authentication enabled, the actual user_id comes from the JWT token.
 const DefaultUserID = 1
+
+// getUserID extracts the authenticated user ID from the request context.
+// Falls back to DefaultUserID if JWT authentication is not enabled (development mode).
+func getUserID(r *http.Request) int {
+	// Check if JWT authentication is enabled
+	if os.Getenv("SUPABASE_JWT_SECRET") == "" {
+		// Development mode: use hardcoded user ID
+		return DefaultUserID
+	}
+
+	// Production mode: get user ID from context (set by auth middleware)
+	userID := custommw.GetUserID(r.Context())
+	if userID == 0 {
+		// This shouldn't happen if middleware is working correctly
+		log.Println("[WARN] No user_id in context, falling back to DefaultUserID")
+		return DefaultUserID
+	}
+	return userID
+}
 
 // GetHabits returns habits for a specific date (defaults to today).
 // Query param: date=YYYY-MM-DD
@@ -40,11 +60,23 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Query habits for the default user (including description, frequency_details, locked).
-	rows, err := database.DB.Query(r.Context(),
+	// Get authenticated user ID
+	userID := getUserID(r)
+
+	// Start transaction with RLS user context.
+	tx, err := database.BeginTxWithUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("[GetHabits] Failed to start transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// Query habits (RLS filters by user_id automatically, but we keep WHERE for clarity).
+	rows, err := tx.Query(r.Context(),
 		`SELECT id, title, description, icon, color, frequency, frequency_details, locked
 		 FROM habits WHERE user_id = $1 ORDER BY id`,
-		DefaultUserID)
+		userID)
 	if err != nil {
 		log.Printf("[GetHabits] DB query error: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -76,7 +108,7 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Batch fetch all logs for all habits in a single query (fixes N+1 problem).
-	logsByHabit, err := fetchCompletedDatesBatch(r.Context(), habitIDs)
+	logsByHabit, err := fetchCompletedDatesBatchTx(r.Context(), tx, habitIDs)
 	if err != nil {
 		log.Printf("[GetHabits] Failed to batch fetch logs: %v", err)
 		// Continue with empty logs rather than failing the entire request.
@@ -116,6 +148,13 @@ func GetHabits(w http.ResponseWriter, r *http.Request) {
 		filteredHabits = append(filteredHabits, h)
 	}
 	habits = filteredHabits
+
+	// Commit transaction (read-only, but required for RLS context).
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Printf("[GetHabits] Failed to commit transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	// Return empty array instead of null when no habits (better for frontend).
 	if habits == nil {
@@ -162,6 +201,40 @@ func fetchCompletedDatesBatch(ctx context.Context, habitIDs []int) (map[int][]st
 	}
 
 	rows, err := database.DB.Query(ctx,
+		`SELECT habit_id, completed_at::text
+		 FROM habit_logs
+		 WHERE habit_id = ANY($1)
+		 ORDER BY habit_id, completed_at DESC`,
+		habitIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	logsByHabit := make(map[int][]string)
+	for rows.Next() {
+		var habitID int
+		var d string
+		if err := rows.Scan(&habitID, &d); err != nil {
+			continue
+		}
+		// PostgreSQL may return "2024-01-15T00:00:00Z" - trim to date part if needed.
+		if len(d) >= 10 {
+			d = d[:10]
+		}
+		logsByHabit[habitID] = append(logsByHabit[habitID], d)
+	}
+	return logsByHabit, rows.Err()
+}
+
+// fetchCompletedDatesBatchTx is the transaction-aware version of fetchCompletedDatesBatch.
+// It uses the provided transaction instead of the global DB pool to work with RLS context.
+func fetchCompletedDatesBatchTx(ctx context.Context, tx database.TxQuerier, habitIDs []int) (map[int][]string, error) {
+	if len(habitIDs) == 0 {
+		return make(map[int][]string), nil
+	}
+
+	rows, err := tx.Query(ctx,
 		`SELECT habit_id, completed_at::text
 		 FROM habit_logs
 		 WHERE habit_id = ANY($1)
@@ -414,15 +487,34 @@ func CreateHabit(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[CreateHabit] FrequencyDetails: %s", string(*req.FrequencyDetails))
 	}
 
+	// Get authenticated user ID
+	userID := getUserID(r)
+
+	// Start transaction with RLS user context.
+	tx, err := database.BeginTxWithUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("[CreateHabit] Failed to start transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
 	var id int
-	err := database.DB.QueryRow(r.Context(),
+	err = tx.QueryRow(r.Context(),
 		`INSERT INTO habits (user_id, title, description, icon, color, frequency, frequency_details, locked)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) RETURNING id`,
-		DefaultUserID, req.Title, desc, req.Icon, req.Color, req.Frequency,
+		userID, req.Title, desc, req.Icon, req.Color, req.Frequency,
 		req.FrequencyDetails, locked).Scan(&id)
 	if err != nil {
 		log.Printf("[CreateHabit] INSERT error: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Commit transaction.
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Printf("[CreateHabit] Failed to commit transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -460,8 +552,11 @@ func ToggleHabitLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Begin transaction to ensure atomicity and prevent race conditions.
-	tx, err := database.DB.Begin(r.Context())
+	// Get authenticated user ID
+	userID := getUserID(r)
+
+	// Begin transaction with RLS user context to ensure atomicity and prevent race conditions.
+	tx, err := database.BeginTxWithUser(r.Context(), userID)
 	if err != nil {
 		log.Printf("[ToggleHabitLog] Failed to begin transaction: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -530,9 +625,21 @@ func DeleteHabit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := database.DB.Exec(r.Context(),
+	// Get authenticated user ID
+	userID := getUserID(r)
+
+	// Start transaction with RLS user context.
+	tx, err := database.BeginTxWithUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("[DeleteHabit] Failed to start transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	result, err := tx.Exec(r.Context(),
 		"DELETE FROM habits WHERE id = $1 AND user_id = $2",
-		habitID, DefaultUserID)
+		habitID, userID)
 	if err != nil {
 		log.Printf("[DeleteHabit] DELETE error: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -542,6 +649,13 @@ func DeleteHabit(w http.ResponseWriter, r *http.Request) {
 	if result.RowsAffected() == 0 {
 		log.Printf("[DeleteHabit] Habit %d not found or not owned by user", habitID)
 		http.Error(w, "Habit not found", http.StatusNotFound)
+		return
+	}
+
+	// Commit transaction.
+	if err := tx.Commit(r.Context()); err != nil {
+		log.Printf("[DeleteHabit] Failed to commit transaction: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 

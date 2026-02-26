@@ -8,8 +8,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// TxQuerier is an interface that both pgx.Tx and pgxpool.Pool implement.
+// This allows functions to accept either a transaction or the global pool.
+type TxQuerier interface {
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+	Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error)
+}
 
 // DB is a global connection pool. The pool reuses connections instead of
 // opening a new one per request, which is much more efficient.
