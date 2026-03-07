@@ -21,14 +21,20 @@ Backend API for the habit tracker app. Built with Go, [chi](https://github.com/g
    ```
    You should see: `Connected to Supabase successfully` and `Server starting on http://localhost:8080`.
 
-5. **Test**
-   ```bash
-   # Create a habit
-   curl -X POST http://localhost:8080/api/habits -H "Content-Type: application/json" -d "{\"title\":\"Drink Water\",\"color\":\"#58cc02\"}"
+6. **Production API**
+   - The API is also deployed at: `https://habits-tracker-be.onrender.com/api/`
 
-   # List habits
-   curl http://localhost:8080/api/habits
+5. **Test & API Usage**
+   - For quick testing, you can use the provided [REST Client](api_tests.http) file (requires VS Code + REST Client extension).
+   - For scripting, see the [Python Client Sample](scripts/api_client.py).
+   - For a full guide on using this as a standalone API (including authentication), see [API_USAGE.md](API_USAGE.md).
+
+
+   ```bash
+   # Quick health check (no auth)
+   curl http://localhost:8080/api/auth/me
    ```
+
 
 ## Running tests
 

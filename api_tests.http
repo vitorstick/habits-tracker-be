@@ -1,0 +1,52 @@
+@baseUrl = http://localhost:8080/api
+@prodUrl = https://habits-tracker-be.onrender.com/api
+
+@email = test@example.com
+@password = password123
+
+### 1. Register User
+# @name register
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+    "email": "{{email}}",
+    "name": "Test User",
+    "password": "{{password}}"
+}
+
+### 2. Login User
+# @name login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+    "email": "{{email}}",
+    "password": "{{password}}"
+}
+
+### Capture Token from Login
+@authToken = {{login.response.body.token}}
+
+### 3. Get Habits
+GET {{baseUrl}}/habits
+Authorization: Bearer {{authToken}}
+
+### 4. Create Habit
+POST {{baseUrl}}/habits
+Authorization: Bearer {{authToken}}
+Content-Type: application/json
+
+{
+    "name": "Exercise",
+    "description": "Daily workout for 30 minutes"
+}
+
+### 5. Log Habit (Toggle)
+# Replace {id} with an actual habit ID
+POST {{baseUrl}}/habits/1/log
+Authorization: Bearer {{authToken}}
+
+### 6. Get Current User (Me)
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{authToken}}
