@@ -73,6 +73,11 @@ class HabitTrackerAPI:
         response = requests.post(url, headers=headers)
         return response.json() if response.status_code == 200 else None
 
+    def logout(self):
+        """Logging out is client-side: just discard the token."""
+        self.token = None
+        print("Logged out (token cleared locally).")
+
 if __name__ == "__main__":
     # Example usage:
     # To use production: api = HabitTrackerAPI(base_url=PRODUCTION_URL)

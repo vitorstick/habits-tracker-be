@@ -22,7 +22,15 @@ This guide explains how to use the Habit Tracker backend as a standalone API, su
 
 ---
 
-## 🛠️ Usage Examples
+## � Logging Out
+
+Since this API uses **stateless JWTs**, logging out is a **client-side action**. The server does not maintain sessions.
+
+- **To log out**: Simply discard the token from your client storage (e.g., `localStorage` in a browser, or a variable in a script).
+- **In Python Client**: Use `api.logout()` which clears the internal token.
+- **Why?**: Once a JWT is issued, it remains valid until it expires. Security is handled by setting appropriate expiration times (currently 3 days) and using HTTPS.
+
+## �🛠️ Usage Examples
 
 ### Using `curl`
 
